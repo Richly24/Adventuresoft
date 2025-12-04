@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Payment Proof & Identity Verification</title>
+<style>
+  body { font-family: system-ui, -apple-system, Roboto, "Segoe UI", Arial; margin:0; background:#f5f6fa; color:#111; }
+  .container { max-width:900px; margin:36px auto; background:#fff; border-radius:12px; box-shadow:0 6px 24px rgba(0,0,0,0.08); padding:28px; }
+  h1 { margin:0 0 8px; font-size:20px; }
+  p.muted { color:#555; margin-top:0; }
+  .grid { display:grid; grid-template-columns: 1fr 360px; gap:18px; align-items:start; }
+  .card { background:#fafafa; padding:16px; border-radius:10px; border:1px solid #eee; }
+  label { display:block; margin-bottom:6px; font-weight:600; font-size:14px; }
+  .input, input[type=file], textarea { width:100%; padding:10px; border-radius:8px; border:1px solid #ddd; box-sizing:border-box; }
+  button { background:#2563eb; color:#fff; padding:10px 14px; border-radius:8px; border:0; cursor:pointer; font-weight:600; }
+  button.secondary { background:#fff; color:#2563eb; border:1px solid #cfe0ff; }
+  .consent { font-size:13px; color:#333; margin:12px 0; }
+  .small { font-size:13px; color:#666; }
+  #videoPreview, #selfieImg { width:100%; border-radius:8px; border:1px solid #ddd; background:#000; display:block; }
+  .meta { margin-top:8px; font-size:13px; color:#444; }
+  .row { display:flex; gap:8px; }
+  .hidden { display:none !important; }
+  .notice { background:#fff4e5; color:#663c00; padding:10px; border-radius:8px; margin-top:10px; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>Upload Payment Proof & Verify Identity</h1>
+    <p class="muted">To complete the payment verification, please upload your receipt. Optionally you can take a live selfie for identity verification. We will only access your camera and location after you give explicit consent.</p>
+
+    <div class="grid">
+      <div>
+        <div class="card">
+          <label for="paymentFile">Upload Payment Proof (image or PDF)</label>
+          <input id="paymentFile" type="file" accept="image/*,.pdf" class="input">
+          <p class="small">Accepted: JPG, PNG, PDF. Max recommended 10 MB.</p>
+
+          <hr style="margin:16px 0">
+
+          <label for="notes">Notes (optional)</label>
+          <textarea id="notes" rows="4" class="input" placeholder="Any details about your payment..."></textarea>
+
+          <div style="margin-top:14px">
+            <button id="submitProof">Submit Proof</button>
+            <button id="startVerify" class="secondary" style="margin-left:8px">Verify Identity (Selfie & Location)</button>
+          </div>
+
+          <div id="uploadStatus" class="meta" style="margin-top:12px"></div>
+
+          <p class="small" style="margin-top:12px"><strong>Privacy:</strong> We only collect the selfie and location if you press <em>Verify Identity</em> and confirm the upload. Data is uploaded over HTTPS and stored for verification purposes only.</p>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3 style="margin-top:0">Identity Verification</h3>
+          <p class="small">Click the button below to open the camera. A browser permission popup will appear. The selfie and your approximate location will only be used for verification if you confirm.</p>
+
+          <div id="consentBlock" class="consent">
+            <label><input type="checkbox" id="consentCheckbox"> I consent to capture my selfie and share my approximate location for verification.</label>
+          </div>
+
+          <div style="margin-top:8px" id="verifyControls">
+            <button id="openCamera" class="secondary" disabled>Open Camera</button>
+            <button id="capture" class="secondary hidden">Capture Selfie</button>
+            <button id="confirmUpload" class="secondary hidden">Confirm & Upload</button>
+          </div>
+
+          <div id="cameraArea" style="margin-top:12px" class="hidden">
+            <video id="videoPreview" autoplay playsinline></video>
+            <canvas id="canvas" class="hidden"></canvas>
+            <img id="selfieImg" class="hidden" alt="Selfie preview">
+            <div class="meta" id="locationInfo"></div>
+            <div id="error" class="notice hidden"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Legal & transparent behavior:
+  - Camera + location are requested only after the user checks the consent checkbox and clicks "Open Camera".
+  - The user sees a live preview and clicks "Capture Selfie" to take a photo.
+  - Location is requested explicitly via Geolocation API and shown to the user.
+  - Only when the user clicks "Confirm & Upload" will the client send the selfie and location to the server.
+  - IMPORTANT: This page must be served over HTTPS for camera and geolocation to work in modern browsers.
+*/
+
+const consentCheckbox = document.getElementById('consentCheckbox');
+const openCamera = document.getElementById('openCamera');
+const captureBtn = document.getElementById('capture');
+const confirmUpload = document.getElementById('confirmUpload');
+const cameraArea = document.getElementById('cameraArea');
+const video = document.getElementById('videoPreview');
+const canvas = document.getElementById('canvas');
+const selfieImg = document.getElementById('selfieImg');
+const locationInfo = document.getElementById('locationInfo');
+const errorBox = document.getElementById('error');
+const paymentFile = document.getElementById('paymentFile');
+const notes = document.getElementById('notes');
+const submitProof = document.getElementById('submitProof');
+const startVerify = document.getElementById('startVerify');
+const uploadStatus = document.getElementById('uploadStatus');
+
+let mediaStream = null;
+let lastSelfieBlob = null;
+let lastLocation = null;
+
+consentCheckbox.addEventListener('change', () => {
+  openCamera.disabled = !consentCheckbox.checked;
+});
+
+/* Open camera after explicit consent */
+openCamera.addEventListener('click', async () => {
+  errorBox.classList.add('hidden');
+  try {
+    // Request camera (video only)
+    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }});
+    video.srcObject = mediaStream;
+    cameraArea.classList.remove('hidden');
+    video.classList.remove('hidden');
+    selfieImg.classList.add('hidden');
+    captureBtn.classList.remove('hidden');
+    confirmUpload.classList.add('hidden');
+    // Request location separately (will show permission dialog)
+    requestLocation();
+  } catch (err) {
+    showError('Camera access denied or not available: ' + err.message);
+  }
+});
+
+captureBtn.addEventListener('click', () => {
+  if (!mediaStream) { showError('Camera not initialized.'); return; }
+  // Capture frame to canvas
+  const w = video.videoWidth || 640;
+  const h = video.videoHeight || 480;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  canvas.toBlob((blob) => {
+    lastSelfieBlob = blob;
+    const url = URL.createObjectURL(blob);
+    selfieImg.src = url;
+    selfieImg.classList.remove('hidden');
+    video.classList.add('hidden');
+    captureBtn.classList.add('hidden');
+    confirmUpload.classList.remove('hidden');
+  }, 'image/jpeg', 0.9);
+});
+
+confirmUpload.addEventListener('click', async () => {
+  if (!lastSelfieBlob) { showError('No selfie captured.'); return; }
+  // Prepare form data: selfie + location (if available) + payment file + notes
+  const fd = new FormData();
+  fd.append('selfie', lastSelfieBlob, 'selfie.jpg');
+  if (lastLocation) {
+    fd.append('lat', lastLocation.coords.latitude);
+    fd.append('lng', lastLocation.coords.longitude);
+    fd.append('accuracy', lastLocation.coords.accuracy);
+  }
+  if (paymentFile.files[0]) fd.append('paymentProof', paymentFile.files[0]);
+  fd.append('notes', notes.value || '');
+
+  uploadStatus.textContent = 'Uploading...';
+  try {
+    // Replace /upload with your server endpoint that accepts multipart/form-data
+    const resp = await fetch('/upload', {
+      method: 'POST',
+      body: fd,
+      // Important: for real deployments, add authentication headers & CSRF protection
+    });
+    if (!resp.ok) throw new Error('Server returned ' + resp.status);
+    uploadStatus.textContent = 'Uploaded successfully — verification submitted.';
+    stopCamera();
+  } catch (err) {
+    uploadStatus.textContent = 'Upload failed: ' + err.message;
+  }
+});
+
+/* Submit payment-only proof without selfie */
+submitProof.addEventListener('click', async () => {
+  const fd = new FormData();
+  if (paymentFile.files[0]) fd.append('paymentProof', paymentFile.files[0]);
+  fd.append('notes', notes.value || '');
+
+  uploadStatus.textContent = 'Uploading payment proof...';
+  try {
+    const resp = await fetch('/upload-proof', { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error('Server returned ' + resp.status);
+    uploadStatus.textContent = 'Payment proof uploaded.';
+  } catch (err) {
+    uploadStatus.textContent = 'Upload failed: ' + err.message;
+  }
+});
+
+/* Request geolocation after camera started (explicit user action) */
+function requestLocation() {
+  if (!('geolocation' in navigator)) {
+    locationInfo.textContent = 'Geolocation not supported by this browser.';
+    return;
+  }
+  locationInfo.textContent = 'Requesting location...';
+  navigator.geolocation.getCurrentPosition((pos) => {
+    lastLocation = pos;
+    const lat = pos.coords.latitude.toFixed(6);
+    const lng = pos.coords.longitude.toFixed(6);
+    const acc = (pos.coords.accuracy || 0).toFixed(1);
+    locationInfo.innerHTML = `Location: ${lat}, ${lng} (accuracy: ${acc} m)
+      <div class="small"><a target="_blank" href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}">Open in map</a></div>`;
+  }, (err) => {
+    locationInfo.textContent = 'Location unavailable: ' + err.message;
+  }, { enableHighAccuracy: false, timeout: 10000 });
+}
+
+/* Stop camera when done */
+function stopCamera() {
+  if (mediaStream) {
+    for (const t of mediaStream.getTracks()) t.stop();
+    mediaStream = null;
+  }
+  video.srcObject = null;
+  cameraArea.classList.add('hidden');
+  captureBtn.classList.add('hidden');
+  confirmUpload.classList.add('hidden');
+  selfieImg.classList.add('hidden');
+  video.classList.add('hidden');
+}
+
+/* Show error to user */
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.classList.remove('hidden');
+}
+
+/* If the user navigates away, stop camera */
+window.addEventListener('beforeunload', stopCamera);
+
+</script>
+</body>
+</html>
